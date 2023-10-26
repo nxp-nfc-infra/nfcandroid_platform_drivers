@@ -1,6 +1,6 @@
 /******************************************************************************
  * Copyright (C) 2015, The Linux Foundation. All rights reserved.
- * Copyright 2013-2022 NXP
+ * Copyright 2013-2023 NXP
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -165,6 +165,18 @@ int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count)
 				ret = -EIO;
 				goto err;
 			}
+			/*
+			 * NFC service wanted to close the driver so,
+			 * release the calling reader thread asap.
+			 *
+			 * This can happen in case of nfc node close call from
+			 * eSE HAL in that case the NFC HAL reader thread
+			 * will again call read system call
+			 */
+			if (nfc_dev->release_read) {
+				pr_debug("%s: releasing read\n", __func__);
+				return 0;
+			}
 			pr_warn("%s: spurious interrupt detected\n", __func__);
 		}
 	}
@@ -232,12 +244,17 @@ ssize_t nfc_i2c_dev_read(struct file *filp, char __user *buf, size_t count,
 	int ret;
 	struct nfc_dev *nfc_dev = (struct nfc_dev *)filp->private_data;
 
-	if (filp->f_flags & O_NONBLOCK) {
-		pr_err("%s: f_flags has nonblock. try again\n", __func__);
-		return -EAGAIN;
+	if (!nfc_dev) {
+		pr_err("%s: device doesn't exist anymore\n", __func__);
+		return -ENODEV;
 	}
 	mutex_lock(&nfc_dev->read_mutex);
-	ret = i2c_read(nfc_dev, nfc_dev->read_kbuf, count);
+	if (filp->f_flags & O_NONBLOCK) {
+		ret = i2c_master_recv(nfc_dev->i2c_dev.client, nfc_dev->read_kbuf, count);
+		pr_debug("%s: NONBLOCK read ret = %d\n", __func__, ret);
+	} else {
+		ret = i2c_read(nfc_dev, nfc_dev->read_kbuf, count);
+	}
 	if (ret > 0) {
 		if (copy_to_user(buf, nfc_dev->read_kbuf, ret)) {
 			pr_warn("%s: failed to copy to user space\n", __func__);
@@ -275,6 +292,7 @@ static const struct file_operations nfc_i2c_dev_fops = {
 	.write = nfc_i2c_dev_write,
 	.open = nfc_dev_open,
 	.release = nfc_dev_close,
+	.flush   = nfc_dev_flush,
 	.unlocked_ioctl = nfc_dev_ioctl,
 };
 

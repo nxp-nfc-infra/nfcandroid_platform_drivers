@@ -1,6 +1,6 @@
 /******************************************************************************
  * Copyright (C) 2015, The Linux Foundation. All rights reserved.
- * Copyright 2019-2022 NXP
+ * Copyright 2019-2023 NXP
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -180,6 +180,7 @@ struct nfc_dev {
 	uint8_t nfc_state;
 	/* NFC VEN pin state */
 	bool nfc_ven_enabled;
+	bool release_read;
 	struct i2c_dev i2c_dev;
 	struct platform_configs configs;
 	int irq_sw_smcu_done;
@@ -193,6 +194,7 @@ struct nfc_dev {
 
 int nfc_dev_open(struct inode *inode, struct file *filp);
 int nfc_dev_close(struct inode *inode, struct file *filp);
+int nfc_dev_flush(struct file *pfile, fl_owner_t id);
 long nfc_dev_ioctl(struct file *pfile, unsigned int cmd, unsigned long arg);
 int nfc_parse_dt(struct device *dev, struct platform_configs *nfc_configs,
 		 uint8_t interface);
