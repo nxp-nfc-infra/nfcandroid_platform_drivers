@@ -1,6 +1,6 @@
 /******************************************************************************
  * Copyright (C) 2015, The Linux Foundation. All rights reserved.
- * Copyright 2019-2023 NXP
+ * Copyright 2019-2021,2023 NXP
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,10 +24,8 @@
 
 /* kept same as dts */
 #define NFC_I2C_DRV_STR			"nxp,nxpnfc"
-#define NFC_I2C_M_DRV_STR		"nxp,nxpnfc_m"
 #define NFC_I2C_DEV_ID			"nxpnfc"
-#define NFC_I2C_M_DEV_ID		"nxpnfc_m"
-#define CONFIG_NXP_DEBUG_BOARD   y
+
 /* Interface specific parameters */
 struct i2c_dev {
 	struct i2c_client *client;

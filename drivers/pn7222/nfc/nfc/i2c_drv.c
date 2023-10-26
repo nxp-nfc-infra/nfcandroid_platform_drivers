@@ -43,6 +43,11 @@
 
 #include "common.h"
 
+/* I2C-M / I2c-HIF interface module parameter*/
+static bool i2c_sw_param;
+module_param(i2c_sw_param, bool, 0600); // S_IRUSR | S_IWUSR
+MODULE_PARM_DESC(i2c_sw_param, "Selects I2C interface");
+
 /**
  * i2c_disable_irq()
  *
@@ -101,6 +106,28 @@ static irqreturn_t i2c_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static irqreturn_t smcu_mode_switch_irq_handler(int irq, void *dev_id)
+{
+	int state;
+	struct nfc_dev *nfc_dev = dev_id;
+	/* read the button value and change the led state */
+	state = get_valid_gpio(nfc_dev->configs.gpio.mode_sw_smcu_done);
+	pr_info("btn1 interrupt: Interrupt! btn2 state is %d)\n", state);
+	return IRQ_HANDLED;
+}
+
+/**
+ * i2c_m_enable()
+ * Sets i2c_switch gpio if i2c_sw_param equals to 1
+ *
+ **/
+int i2c_m_enable(struct platform_gpio *nfc_gpio)
+{
+	if (i2c_sw_param)
+		gpio_direction_output(nfc_gpio->i2c_sw, 1);
+	return 0;
+}
+
 int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count)
 {
 	int ret;
@@ -155,6 +182,8 @@ int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count)
 	}
 
 	memset(buf, 0x00, count);
+	if (i2c_sw_param)
+		usleep_range(IRQ_TO_READ_DELAY,IRQ_TO_READ_DELAY + 5);
 	/* Read data */
 	ret = i2c_master_recv(nfc_dev->i2c_dev.client, buf, count);
 	if (ret <= 0) {
@@ -327,6 +356,21 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		goto err_free_gpio;
 	}
 	client->irq = ret;
+	ret = configure_gpio(nfc_gpio->mode_sw_smcu_done, GPIO_IRQ);
+	if (ret <= 0) {
+		pr_err
+			("%s: unable to request mode switch sp done interface gpio [%d]\n",
+			 __func__, nfc_gpio->mode_sw_smcu_done);
+		goto err_free_gpio;
+	}
+	nfc_dev->irq_sw_smcu_done = ret;
+
+	ret = configure_gpio(nfc_gpio->i2c_sw, GPIO_OUTPUT);
+	if (ret) {
+		pr_err("%s: unable to request i2c switch interface gpio [%d]\n",
+			   __func__, nfc_gpio->i2c_sw);
+		goto err_free_gpio;
+	}
 	ret = configure_gpio(nfc_gpio->mode_sw_nfcc, GPIO_OUTPUT);
 	if (ret) {
 		pr_err
@@ -334,9 +378,19 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			 __func__, nfc_gpio->mode_sw_nfcc);
 		goto err_free_gpio;
 	}
+	ret = configure_gpio(nfc_gpio->mode_sw_smcu, GPIO_OUTPUT);
+	if (ret) {
+		pr_err
+			("%s: unable to request mode switch sp interface gpio [%d]\n",
+			 __func__, nfc_gpio->mode_sw_smcu);
+		goto err_free_gpio;
+	}
+
 	#ifdef CONFIG_NXP_DEBUG_BOARD
 	/* configure board leds as OUTPUT gpios */
 	configure_leds(nfc_gpio);
+	/* enable i2c_m as interface*/
+	i2c_m_enable(nfc_gpio);
 	#endif
 
 	/* copy the retrieved gpio details from DT */
@@ -372,6 +426,16 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	device_init_wakeup(&client->dev, true);
 	i2c_set_clientdata(client, nfc_dev);
 	i2c_dev->irq_wake_up = false;
+	pr_info("%s: requesting IRQ %d\n", __func__, nfc_dev->irq_sw_smcu_done);
+	ret =
+		request_threaded_irq(nfc_dev->irq_sw_smcu_done, NULL,
+				 smcu_mode_switch_irq_handler,
+				 IRQF_TRIGGER_HIGH | IRQF_ONESHOT,
+				 NFC_I2C_DRV_STR, nfc_dev);
+	if (ret) {
+		pr_err("%s: request_irq failed\n", __func__);
+		goto err_nfc_misc_unregister;
+	}
 	pr_info("%s: probing nfc i2c successfully\n", __func__);
 	return 0;
 err_nfc_misc_unregister:
@@ -411,6 +475,7 @@ int nfc_i2c_dev_remove(struct i2c_client *client)
 	}
 	device_init_wakeup(&client->dev, false);
 	free_irq(client->irq, nfc_dev);
+	free_irq(nfc_dev->irq_sw_smcu_done, nfc_dev);
 	nfc_misc_unregister(nfc_dev, DEV_COUNT);
 	mutex_destroy(&nfc_dev->read_mutex);
 	mutex_destroy(&nfc_dev->write_mutex);
@@ -451,9 +516,19 @@ static const struct i2c_device_id nfc_i2c_dev_id[] = { { NFC_I2C_DEV_ID, 0 },
 { }
 };
 
+static const struct i2c_device_id nfc_i2c_m_dev_id[] = { { NFC_I2C_M_DEV_ID, 0 },
+{ }
+};
+
 static const struct of_device_id nfc_i2c_dev_match_table[] = {
 	{
 	 .compatible = NFC_I2C_DRV_STR,
+	  },
+	{ }
+};
+static const struct of_device_id nfc_i2c_m_dev_match_table[] = {
+	{
+	 .compatible = NFC_I2C_M_DRV_STR,
 	  },
 	{ }
 };
@@ -475,11 +550,17 @@ static struct i2c_driver nfc_i2c_dev_driver = {
 };
 
 MODULE_DEVICE_TABLE(of, nfc_i2c_dev_match_table);
+MODULE_DEVICE_TABLE(of, nfc_i2c_m_dev_match_table);
 static int __init nfc_i2c_dev_init(void)
 {
 	int ret = 0;
 
 	pr_info("%s: Loading NXP NFC I2C driver\n", __func__);
+	if (i2c_sw_param) {
+		nfc_i2c_dev_driver.driver.of_match_table = nfc_i2c_m_dev_match_table;
+		nfc_i2c_dev_driver.id_table = nfc_i2c_m_dev_id;
+	}
+
 	ret = i2c_add_driver(&nfc_i2c_dev_driver);
 	if (ret != 0)
 		pr_err("%s: NFC I2C add driver error ret %d\n", __func__, ret);

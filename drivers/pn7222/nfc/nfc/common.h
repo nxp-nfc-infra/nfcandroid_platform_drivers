@@ -60,6 +60,8 @@
 
 /* command response timeout */
 #define NCI_CMD_RSP_TIMEOUT_MS		(2000)
+/* Time to wait for issuing read */
+#define IRQ_TO_READ_DELAY		(50)
 /* Time to wait for NFCC to be ready again after any change in the GPIO */
 #define NFC_GPIO_SET_WAIT_TIME_US	(10000)
 /* Time to wait for IRQ low during write 5*3ms */
@@ -74,11 +76,15 @@
 /* The type should be aligned with MW HAL definitions */
 #define NFC_SET_PWR			_IOW(NFC_MAGIC, 0x01, uint32_t)
 #define NFCC_PROFILE_SWITCH         _IOW(NFC_MAGIC, 0x04, uint32_t)
+#define SMCU_PROFILE_SWITCH      _IOW(NFC_MAGIC, 0x05, uint32_t)
 #define LEDS_CONTROL             _IOW(NFC_MAGIC, 0x06, uint32_t)
 
 #define DTS_IRQ_GPIO_STR		"nxp,nxpnfc-irq"
 #define DTS_VEN_GPIO_STR		"nxp,nxpnfc-ven"
+#define DTS_I2C_SW_STR          "nxp,nxpnfc-i2c_sw"
 #define DTS_MODE_SW_STR         "nxp,nxpnfc-mode_sw"
+#define DTS_MODE_SW_SP_STR      "nxp,nxpnfc-mode_sw_sp"
+#define DTS_MODE_SW_SP_DONE_STR "nxp,nxpnfc-mode_sw_sp_done"
 #define DTS_RED_LED_STR         "nxp,nxpnfc-led1"
 #define DTS_GREEN_LED_STR       "nxp,nxpnfc-led2"
 
@@ -136,7 +142,10 @@ enum gpio_values {
 struct platform_gpio {
 	unsigned int irq;
 	unsigned int ven;
+	unsigned int i2c_sw;
 	unsigned int mode_sw_nfcc;
+	unsigned int mode_sw_smcu;
+	unsigned int mode_sw_smcu_done;
 	unsigned int led_red;
 	unsigned int led_green;
 };
@@ -176,6 +185,7 @@ struct nfc_dev {
 	bool release_read;
 	struct i2c_dev i2c_dev;
 	struct platform_configs configs;
+	int irq_sw_smcu_done;
 	/* function pointers for the common i2c functionality */
 	int (*nfc_read)(struct nfc_dev *dev, char *buf, size_t count);
 	int (*nfc_write)(struct nfc_dev *dev, const char *buf,
@@ -191,8 +201,8 @@ long nfc_dev_ioctl(struct file *pfile, unsigned int cmd, unsigned long arg);
 int nfc_parse_dt(struct device *dev, struct platform_configs *nfc_configs,
 		 uint8_t interface);
 int nfc_misc_register(struct nfc_dev *nfc_dev,
-		      const struct file_operations *nfc_fops, int count,
-		      char *devname, char *classname);
+			  const struct file_operations *nfc_fops, int count,
+			  char *devname, char *classname);
 void nfc_misc_unregister(struct nfc_dev *nfc_dev, int count);
 int configure_gpio(unsigned int gpio, int flag);
 int configure_leds(struct platform_gpio *nfc_gpio);

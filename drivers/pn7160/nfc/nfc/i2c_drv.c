@@ -1,6 +1,6 @@
 /******************************************************************************
  * Copyright (C) 2015, The Linux Foundation. All rights reserved.
- * Copyright 2013-2023 NXP
+ * Copyright 2013-2021,2023 NXP
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -101,13 +101,16 @@ static irqreturn_t i2c_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count)
+int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count, int timeout)
 {
 	int ret;
 	struct i2c_dev *i2c_dev = &nfc_dev->i2c_dev;
 	struct platform_gpio *nfc_gpio = &nfc_dev->configs.gpio;
 
 	pr_debug("%s: reading %zu bytes.\n", __func__, count);
+
+	if (timeout > NCI_CMD_RSP_TIMEOUT_MS)
+		timeout = NCI_CMD_RSP_TIMEOUT_MS;
 
 	if (count > MAX_NCI_BUFFER_SIZE)
 		count = MAX_NCI_BUFFER_SIZE;
@@ -120,13 +123,26 @@ int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count)
 				enable_irq(i2c_dev->client->irq);
 			}
 			if (!gpio_get_value(nfc_gpio->irq)) {
-				ret = wait_event_interruptible(nfc_dev->read_wq,
-								   !i2c_dev->
-								   irq_enabled);
-				if (ret) {
-					pr_err("%s: err wakeup of wq\n",
-						   __func__);
-					goto err;
+				if (timeout) {
+					ret = wait_event_interruptible_timeout(
+						nfc_dev->read_wq,
+						!i2c_dev->irq_enabled,
+						msecs_to_jiffies(timeout));
+
+					if (ret <= 0) {
+						pr_err("%s: timeout error\n",
+						       __func__);
+						goto err;
+					}
+				} else {
+					ret = wait_event_interruptible(
+						nfc_dev->read_wq,
+						!i2c_dev->irq_enabled);
+					if (ret) {
+						pr_err("%s: err wakeup of wq\n",
+						       __func__);
+						goto err;
+					}
 				}
 			}
 			i2c_disable_irq(nfc_dev);
@@ -137,18 +153,6 @@ int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count)
 				pr_info("%s: releasing read\n", __func__);
 				ret = -EIO;
 				goto err;
-			}
-			/*
-			 * NFC service wanted to close the driver so,
-			 * release the calling reader thread asap.
-			 *
-			 * This can happen in case of nfc node close call from
-			 * eSE HAL in that case the NFC HAL reader thread
-			 * will again call read system call
-			 */
-			if (nfc_dev->release_read) {
-				pr_debug("%s: releasing read\n", __func__);
-				return 0;
 			}
 			pr_warn("%s: spurious interrupt detected\n", __func__);
 		}
@@ -166,7 +170,7 @@ err:
 }
 
 int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
-		  int max_retry_cnt)
+	      int max_retry_cnt)
 {
 	int ret = -EINVAL;
 	int retry_cnt;
@@ -185,12 +189,12 @@ int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 		if (gpio_get_value(nfc_gpio->irq)) {
 			pr_warn("%s: irq high during write, wait\n", __func__);
 			usleep_range(NFC_WRITE_IRQ_WAIT_TIME_US,
-					 NFC_WRITE_IRQ_WAIT_TIME_US + 100);
+				     NFC_WRITE_IRQ_WAIT_TIME_US + 100);
 		} else {
 			break;
 		}
 		if (retry_cnt == MAX_WRITE_IRQ_COUNT &&
-			gpio_get_value(nfc_gpio->irq)) {
+			     gpio_get_value(nfc_gpio->irq)) {
 			pr_warn("%s: allow after maximum wait\n", __func__);
 		}
 	}
@@ -201,7 +205,7 @@ int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 			pr_warn("%s: write failed ret(%d), maybe in standby\n",
 				__func__, ret);
 			usleep_range(WRITE_RETRY_WAIT_TIME_US,
-					 WRITE_RETRY_WAIT_TIME_US + 100);
+				     WRITE_RETRY_WAIT_TIME_US + 100);
 		} else if (ret != count) {
 			pr_err("%s: failed to write %d\n", __func__, ret);
 			ret = -EIO;
@@ -217,17 +221,12 @@ ssize_t nfc_i2c_dev_read(struct file *filp, char __user *buf, size_t count,
 	int ret;
 	struct nfc_dev *nfc_dev = (struct nfc_dev *)filp->private_data;
 
-	if (!nfc_dev) {
-		pr_err("%s: device doesn't exist anymore\n", __func__);
-		return -ENODEV;
+	if (filp->f_flags & O_NONBLOCK) {
+		pr_err("%s: f_flags has nonblock. try again\n", __func__);
+		return -EAGAIN;
 	}
 	mutex_lock(&nfc_dev->read_mutex);
-	if (filp->f_flags & O_NONBLOCK) {
-		ret = i2c_master_recv(nfc_dev->i2c_dev.client, nfc_dev->read_kbuf, count);
-		pr_debug("%s: NONBLOCK read ret = %d\n", __func__, ret);
-	} else {
-		ret = i2c_read(nfc_dev, nfc_dev->read_kbuf, count);
-	}
+	ret = i2c_read(nfc_dev, nfc_dev->read_kbuf, count, 0);
 	if (ret > 0) {
 		if (copy_to_user(buf, nfc_dev->read_kbuf, ret)) {
 			pr_warn("%s: failed to copy to user space\n", __func__);
@@ -265,7 +264,6 @@ static const struct file_operations nfc_i2c_dev_fops = {
 	.write = nfc_i2c_dev_write,
 	.open = nfc_dev_open,
 	.release = nfc_dev_close,
-	.flush   = nfc_dev_flush,
 	.unlocked_ioctl = nfc_dev_ioctl,
 };
 
@@ -278,7 +276,6 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	struct platform_gpio *nfc_gpio = &nfc_configs.gpio;
 
 	pr_debug("%s: enter\n", __func__);
-	pr_info("%s: i2c slave address 0x%x", __func__, client->addr);
 	/* retrieve details of gpios from dt */
 	ret = nfc_parse_dt(&client->dev, &nfc_configs, PLATFORM_IF_I2C);
 	if (ret) {
@@ -317,31 +314,25 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	ret = configure_gpio(nfc_gpio->ven, GPIO_OUTPUT);
 	if (ret) {
 		pr_err("%s: unable to request nfc reset gpio [%d]\n", __func__,
-			   nfc_gpio->ven);
+		       nfc_gpio->ven);
 		goto err_free_write_kbuf;
 	}
 	ret = configure_gpio(nfc_gpio->irq, GPIO_IRQ);
 	if (ret <= 0) {
 		pr_err("%s: unable to request nfc irq gpio [%d]\n", __func__,
-			   nfc_gpio->irq);
+		       nfc_gpio->irq);
 		goto err_free_gpio;
 	}
 	client->irq = ret;
-	ret = configure_gpio(nfc_gpio->mode_sw_nfcc, GPIO_OUTPUT);
+	ret = configure_gpio(nfc_gpio->dwl_req, GPIO_OUTPUT);
 	if (ret) {
-		pr_err
-			("%s: unable to request mode switch interface gpio [%d]\n",
-			 __func__, nfc_gpio->mode_sw_nfcc);
-		goto err_free_gpio;
+		pr_err("%s: unable to request nfc firm downl gpio [%d]\n",
+		       __func__, nfc_gpio->dwl_req);
 	}
-	#ifdef CONFIG_NXP_DEBUG_BOARD
-	/* configure board leds as OUTPUT gpios */
-	configure_leds(nfc_gpio);
-	#endif
 
 	/* copy the retrieved gpio details from DT */
 	memcpy(&nfc_dev->configs, &nfc_configs,
-		   sizeof(struct platform_configs));
+	       sizeof(struct platform_configs));
 
 	/* init mutex and queues */
 	init_waitqueue_head(&nfc_dev->read_wq);
@@ -368,10 +359,10 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	gpio_set_ven(nfc_dev, 1);
 	gpio_set_ven(nfc_dev, 0);
 	gpio_set_ven(nfc_dev, 1);
-
 	device_init_wakeup(&client->dev, true);
 	i2c_set_clientdata(client, nfc_dev);
 	i2c_dev->irq_wake_up = false;
+
 	pr_info("%s: probing nfc i2c successfully\n", __func__);
 	return 0;
 err_nfc_misc_unregister:
@@ -448,33 +439,32 @@ int nfc_i2c_dev_resume(struct device *device)
 }
 
 static const struct i2c_device_id nfc_i2c_dev_id[] = { { NFC_I2C_DEV_ID, 0 },
-{ }
-};
+						       {} };
 
 static const struct of_device_id nfc_i2c_dev_match_table[] = {
 	{
-	 .compatible = NFC_I2C_DRV_STR,
-	  },
-	{ }
+		.compatible = NFC_I2C_DRV_STR,
+	},
+	{}
 };
 
-static const struct dev_pm_ops nfc_i2c_dev_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(nfc_i2c_dev_suspend, nfc_i2c_dev_resume)
-};
+static const struct dev_pm_ops nfc_i2c_dev_pm_ops = { SET_SYSTEM_SLEEP_PM_OPS(
+	nfc_i2c_dev_suspend, nfc_i2c_dev_resume) };
 
 static struct i2c_driver nfc_i2c_dev_driver = {
 	.id_table = nfc_i2c_dev_id,
 	.probe = nfc_i2c_dev_probe,
 	.remove = nfc_i2c_dev_remove,
 	.driver = {
-		   .name = NFC_I2C_DRV_STR,
-		   .pm = &nfc_i2c_dev_pm_ops,
-		   .of_match_table = nfc_i2c_dev_match_table,
-		   .probe_type = PROBE_PREFER_ASYNCHRONOUS,
-			},
+		.name = NFC_I2C_DRV_STR,
+		.pm = &nfc_i2c_dev_pm_ops,
+		.of_match_table = nfc_i2c_dev_match_table,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+	},
 };
 
 MODULE_DEVICE_TABLE(of, nfc_i2c_dev_match_table);
+
 static int __init nfc_i2c_dev_init(void)
 {
 	int ret = 0;
