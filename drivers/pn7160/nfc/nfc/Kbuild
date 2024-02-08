@@ -6,4 +6,8 @@ nxpnfc_i2c-y := common.o \
 obj-$(CONFIG_NXP_NFC_SPI) := nxpnfc_spi.o
 
 nxpnfc_spi-y := common.o \
-							spi_drv.o
+				spi_drv.o
+
+ccflags-y += -DCONFIG_NXP_NFC_SPI
+ccflags-y += -DCONFIG_NXP_NFC_I2C
+ccflags-y += -DDYNAMIC_DEBUG_MODULE
